@@ -32,13 +32,17 @@ jobs:
         run: |
           set -euo pipefail
           python3 - <<'PY'
+          import os
           from pathlib import Path
+          mode = os.environ["UFS_MODE"]   # build-uefi.sh runs in a later step WITHOUT this env -> bake literal
+          assert mode in ("b5q_ufs", "menu_only", "ioc_off", "both_off"), f"bad UFS_MODE: {mode}"
           p = Path("scripts/build-uefi.sh")
           s = p.read_text()
           needle = 'python3 "$port_root/scripts/prepare.py" "${prepare_args[@]}"'
           assert needle in s, "prepare line not found in build-uefi.sh"
           inject = r'''
           # === F741B patches (inject) ===
+          UFS_MODE="__UFS_MODE_LITERAL__"   # baked literal; build step has no env var
           DSC="$work/uefi-giulia/Platforms/OnePlus/giuliaPkg/giulia.dsc"
           DXEINC="$work/uefi-giulia/Platforms/OnePlus/giuliaPkg/Include/DXE.inc"
           APRIORI="$work/uefi-giulia/Platforms/OnePlus/giuliaPkg/Include/APRIORI.inc"
@@ -77,8 +81,10 @@ jobs:
             grep -n "EnableUfsIOC\|UfsSmmuConfigForOtherBootDev" "$CFGMAP"
           fi
           '''
+          # bake the literal mode into the injected shell so no undefined var survives set -u
+          inject = inject.replace("__UFS_MODE_LITERAL__", mode)
           p.write_text(s.replace(needle, needle + inject, 1))
-          print("Injected F741B patches (framebuffer + UFS mode from $UFS_MODE)")
+          print("Injected F741B patches (framebuffer + UFS mode = " + mode + ")")
           PY
       - name: Build and verify patched UEFI image
         shell: bash
