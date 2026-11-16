@@ -1,4 +1,4 @@
-name: F741B bring-up - UEFI toolchain check (ubuntu)
+name: F741B UEFI - inner panel 1080x2640 (ubuntu)
 on:
   workflow_dispatch:
 
@@ -14,15 +14,40 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y build-essential git python3-venv clang llvm lld uuid-dev nasm gcc-aarch64-linux-gnu acpica-tools device-tree-compiler mono-devel ca-certificates-mono
-      - name: Build and verify UEFI image
+      - name: Inject F741B framebuffer geometry into build script
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path("scripts/build-uefi.sh")
+          s = p.read_text()
+          needle = 'python3 "$port_root/scripts/prepare.py" "${prepare_args[@]}"'
+          assert needle in s, "prepare line not found in build-uefi.sh"
+          inject = needle + '''
+
+          # === F741B inner panel geometry fix (inject) ===
+          DSC="$work/uefi-giulia/Platforms/OnePlus/giuliaPkg/giulia.dsc"
+          echo "=== FB geometry BEFORE ==="
+          grep -n "PcdFrameBufferWidth\|PcdFrameBufferHeight\|USE_CUSTOM_DISPLAY_DRIVER" "$DSC"
+          sed -i "s/PcdFrameBufferWidth|1264/PcdFrameBufferWidth|1080/" "$DSC"
+          sed -i "s/PcdFrameBufferHeight|2780/PcdFrameBufferHeight|2640/" "$DSC"
+          echo "=== FB geometry AFTER ==="
+          grep -n "PcdFrameBufferWidth\|PcdFrameBufferHeight\|USE_CUSTOM_DISPLAY_DRIVER" "$DSC"
+          # USE_CUSTOM_DISPLAY_DRIVER must stay 0 -> SimpleFbDxe (no panel re-init).
+          '''
+          p.write_text(s.replace(needle, inject, 1))
+          print("Injected F741B geometry patch after prepare.py step")
+          PY
+      - name: Build and verify patched UEFI image
         shell: bash
         run: |
           set -o pipefail
           bash scripts/build-uefi.sh "$RUNNER_TEMP/ace5-port" 2>&1 | tee build.log
-      - name: Upload verified image
+      - name: Upload patched image
         uses: actions/upload-artifact@v4
         with:
-          name: f741b-uefi-toolchain-check
+          name: f741b-uefi-inner1080x2640
           if-no-files-found: error
           path: |
             ${{ runner.temp }}/ace5-port/uefi-giulia/Mu-giulia-0.img
@@ -34,7 +59,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: f741b-uefi-build-logs
+          name: f741b-uefi-inner-build-logs
           path: |
             build.log
             ${{ runner.temp }}/ace5-port/uefi-giulia/Build/*.txt
