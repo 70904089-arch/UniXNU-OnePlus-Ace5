@@ -8,6 +8,7 @@ on:
         default: 'menu_only'
         type: choice
         options:
+          - b5q_ioc_off
           - b5q_ufs
           - menu_only
           - ioc_off
@@ -35,7 +36,7 @@ jobs:
           import os
           from pathlib import Path
           mode = os.environ["UFS_MODE"]   # build-uefi.sh runs in a later step WITHOUT this env -> bake literal
-          assert mode in ("b5q_ufs", "menu_only", "ioc_off", "both_off"), f"bad UFS_MODE: {mode}"
+          assert mode in ("b5q_ioc_off", "b5q_ufs", "menu_only", "ioc_off", "both_off"), f"bad UFS_MODE: {mode}"
           p = Path("scripts/build-uefi.sh")
           s = p.read_text()
           needle = 'python3 "$port_root/scripts/prepare.py" "${prepare_args[@]}"'
@@ -57,7 +58,7 @@ jobs:
           # USE_CUSTOM_DISPLAY_DRIVER must stay 0 -> SimpleFbDxe (no panel re-init).
 
           echo "=== UFS MODE: $UFS_MODE ==="
-          if [ "$UFS_MODE" = "b5q_ufs" ]; then
+          if [ "$UFS_MODE" = "b5q_ufs" ] || [ "$UFS_MODE" = "b5q_ioc_off" ]; then
             echo "--- swap OnePlus giulia UFSDxe -> Samsung b5q UFSDxe ---"
             B5Q="$work/uefi-giulia/Binaries/b5q/QcomPkg/Drivers/UFSDxe/UFSDxe.inf"
             # 断言 b5q 三星驱动二进制被 submodule 拉下来了，否则当场失败不出空壳
@@ -74,8 +75,8 @@ jobs:
             sed -i 's|^  INF Binaries/giulia/QcomPkg/Drivers/UFSDxe/UFSDxe.inf|  # F741B: UFSDxe removed|' "$APRIORI"
             grep -n "UFSDxe" "$DXEINC" "$APRIORI" || true
           fi
-          if [ "$UFS_MODE" = "ioc_off" ] || [ "$UFS_MODE" = "both_off" ]; then
-            echo "--- UFS IOC/SMMU config 1 -> 0 ---"
+          if [ "$UFS_MODE" = "ioc_off" ] || [ "$UFS_MODE" = "both_off" ] || [ "$UFS_MODE" = "b5q_ioc_off" ]; then
+            echo "--- UFS IOC/SMMU config 1 -> 0 (b5q_ioc_off also swaps driver above) ---"
             sed -i 's/{"EnableUfsIOC", 1}/{"EnableUfsIOC", 0}/' "$CFGMAP"
             sed -i 's/{"UfsSmmuConfigForOtherBootDev", 1}/{"UfsSmmuConfigForOtherBootDev", 0}/' "$CFGMAP"
             grep -n "EnableUfsIOC\|UfsSmmuConfigForOtherBootDev" "$CFGMAP"
