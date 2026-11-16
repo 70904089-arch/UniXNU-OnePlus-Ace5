@@ -1,0 +1,107 @@
+name: F741B UEFI - UFS fix attempts (inner 1080x2640) + b5q Samsung UFS driver
+on:
+  workflow_dispatch:
+    inputs:
+      ufs_mode:
+        description: 'UFS strategy'
+        required: true
+        default: 'menu_only'
+        type: choice
+        options:
+          - b5q_ufs
+          - menu_only
+          - ioc_off
+          - both_off
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential git python3-venv clang llvm lld uuid-dev nasm gcc-aarch64-linux-gnu acpica-tools device-tree-compiler mono-devel ca-certificates-mono
+      - name: Inject F741B patches (framebuffer + UFS strategy)
+        shell: bash
+        env:
+          UFS_MODE: ${{ inputs.ufs_mode }}
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path("scripts/build-uefi.sh")
+          s = p.read_text()
+          needle = 'python3 "$port_root/scripts/prepare.py" "${prepare_args[@]}"'
+          assert needle in s, "prepare line not found in build-uefi.sh"
+          inject = r'''
+          # === F741B patches (inject) ===
+          DSC="$work/uefi-giulia/Platforms/OnePlus/giuliaPkg/giulia.dsc"
+          DXEINC="$work/uefi-giulia/Platforms/OnePlus/giuliaPkg/Include/DXE.inc"
+          APRIORI="$work/uefi-giulia/Platforms/OnePlus/giuliaPkg/Include/APRIORI.inc"
+          CFGMAP="$work/uefi-giulia/Platforms/OnePlus/giuliaPkg/Library/ConfigurationMapLib/ConfigurationMapLib.c"
+
+          echo "=== FB geometry BEFORE ==="
+          grep -n "PcdFrameBufferWidth\|PcdFrameBufferHeight\|USE_CUSTOM_DISPLAY_DRIVER" "$DSC"
+          sed -i "s/PcdFrameBufferWidth|1264/PcdFrameBufferWidth|1080/" "$DSC"
+          sed -i "s/PcdFrameBufferHeight|2780/PcdFrameBufferHeight|2640/" "$DSC"
+          echo "=== FB geometry AFTER ==="
+          grep -n "PcdFrameBufferWidth\|PcdFrameBufferHeight\|USE_CUSTOM_DISPLAY_DRIVER" "$DSC"
+          # USE_CUSTOM_DISPLAY_DRIVER must stay 0 -> SimpleFbDxe (no panel re-init).
+
+          echo "=== UFS MODE: $UFS_MODE ==="
+          if [ "$UFS_MODE" = "b5q_ufs" ]; then
+            echo "--- swap OnePlus giulia UFSDxe -> Samsung b5q UFSDxe ---"
+            B5Q="$work/uefi-giulia/Binaries/b5q/QcomPkg/Drivers/UFSDxe/UFSDxe.inf"
+            # 断言 b5q 三星驱动二进制被 submodule 拉下来了，否则当场失败不出空壳
+            test -f "$B5Q" || { echo "FATAL: b5q UFSDxe.inf missing after submodule init"; exit 1; }
+            test -f "$work/uefi-giulia/Binaries/b5q/QcomPkg/Drivers/UFSDxe/UFSDxe.patched.efi" || { echo "FATAL: b5q UFSDxe.patched.efi missing"; exit 1; }
+            sed -i 's|Binaries/giulia/QcomPkg/Drivers/UFSDxe/UFSDxe.inf|Binaries/b5q/QcomPkg/Drivers/UFSDxe/UFSDxe.inf|' "$DXEINC"
+            sed -i 's|Binaries/giulia/QcomPkg/Drivers/UFSDxe/UFSDxe.inf|Binaries/b5q/QcomPkg/Drivers/UFSDxe/UFSDxe.inf|' "$APRIORI"
+            echo "--- UFS driver refs after swap ---"
+            grep -n "UFSDxe" "$DXEINC" "$APRIORI" || true
+          fi
+          if [ "$UFS_MODE" = "menu_only" ] || [ "$UFS_MODE" = "both_off" ]; then
+            echo "--- remove oneplus UFSDxe from DXE/APRIORI ---"
+            sed -i 's|^  INF Binaries/giulia/QcomPkg/Drivers/UFSDxe/UFSDxe.inf|  # F741B: UFSDxe removed|' "$DXEINC"
+            sed -i 's|^  INF Binaries/giulia/QcomPkg/Drivers/UFSDxe/UFSDxe.inf|  # F741B: UFSDxe removed|' "$APRIORI"
+            grep -n "UFSDxe" "$DXEINC" "$APRIORI" || true
+          fi
+          if [ "$UFS_MODE" = "ioc_off" ] || [ "$UFS_MODE" = "both_off" ]; then
+            echo "--- UFS IOC/SMMU config 1 -> 0 ---"
+            sed -i 's/{"EnableUfsIOC", 1}/{"EnableUfsIOC", 0}/' "$CFGMAP"
+            sed -i 's/{"UfsSmmuConfigForOtherBootDev", 1}/{"UfsSmmuConfigForOtherBootDev", 0}/' "$CFGMAP"
+            grep -n "EnableUfsIOC\|UfsSmmuConfigForOtherBootDev" "$CFGMAP"
+          fi
+          '''
+          p.write_text(s.replace(needle, needle + inject, 1))
+          print("Injected F741B patches (framebuffer + UFS mode from $UFS_MODE)")
+          PY
+      - name: Build and verify patched UEFI image
+        shell: bash
+        run: |
+          set -o pipefail
+          bash scripts/build-uefi.sh "$RUNNER_TEMP/ace5-port" 2>&1 | tee build.log
+      - name: Upload patched image
+        uses: actions/upload-artifact@v4
+        with:
+          name: f741b-uefi-${{ inputs.ufs_mode }}
+          if-no-files-found: error
+          path: |
+            ${{ runner.temp }}/ace5-port/uefi-giulia/Mu-giulia-0.img
+            ${{ runner.temp }}/ace5-port/image-verification.json
+            ${{ runner.temp }}/ace5-port/uefi-giulia/BootShim/BootShim.bin
+          retention-days: 14
+      - name: Upload logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: f741b-uefi-${{ inputs.ufs_mode }}-build-logs
+          path: |
+            build.log
+            ${{ runner.temp }}/ace5-port/uefi-giulia/Build/*.txt
+            ${{ runner.temp }}/ace5-port/uefi-giulia/Build/giuliaPkg/*.txt
+          retention-days: 14
