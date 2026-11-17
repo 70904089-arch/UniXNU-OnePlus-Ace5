@@ -8,6 +8,8 @@ on:
         default: 'menu_only'
         type: choice
         options:
+          - menu_bare
+          - b6q_native_ioc_off
           - b6q_native
           - b5q_ioc_off
           - b5q_ufs
@@ -37,7 +39,7 @@ jobs:
           import os
           from pathlib import Path
           mode = os.environ["UFS_MODE"]   # build-uefi.sh runs in a later step WITHOUT this env -> bake literal
-          assert mode in ("b6q_native", "b5q_ioc_off", "b5q_ufs", "menu_only", "ioc_off", "both_off"), f"bad UFS_MODE: {mode}"
+          assert mode in ("menu_bare", "b6q_native_ioc_off", "b6q_native", "b5q_ioc_off", "b5q_ufs", "menu_only", "ioc_off", "both_off"), f"bad UFS_MODE: {mode}"
           p = Path("scripts/build-uefi.sh")
           s = p.read_text()
           needle = 'python3 "$port_root/scripts/prepare.py" "${prepare_args[@]}"'
@@ -59,8 +61,8 @@ jobs:
           # USE_CUSTOM_DISPLAY_DRIVER must stay 0 -> SimpleFbDxe (no panel re-init).
 
           echo "=== UFS MODE: $UFS_MODE ==="
-          if [ "$UFS_MODE" = "b5q_ufs" ] || [ "$UFS_MODE" = "b5q_ioc_off" ] || [ "$UFS_MODE" = "b6q_native" ]; then
-            echo "--- swap OnePlus giulia UFSDxe -> Samsung b5q slot (b6q_native overwrites slot below) ---"
+          if [ "$UFS_MODE" = "b5q_ufs" ] || [ "$UFS_MODE" = "b5q_ioc_off" ] || [ "$UFS_MODE" = "b6q_native" ] || [ "$UFS_MODE" = "b6q_native_ioc_off" ]; then
+            echo "--- swap OnePlus giulia UFSDxe -> Samsung b5q slot (b6q_native* overwrites slot below) ---"
             B5Q="$work/uefi-giulia/Binaries/b5q/QcomPkg/Drivers/UFSDxe/UFSDxe.inf"
             # 断言 b5q 三星驱动二进制被 submodule 拉下来了，否则当场失败不出空壳
             test -f "$B5Q" || { echo "FATAL: b5q UFSDxe.inf missing after submodule init"; exit 1; }
@@ -70,19 +72,29 @@ jobs:
             echo "--- UFS driver refs after swap ---"
             grep -n "UFSDxe" "$DXEINC" "$APRIORI" || true
           fi
-          if [ "$UFS_MODE" = "menu_only" ] || [ "$UFS_MODE" = "both_off" ]; then
+          if [ "$UFS_MODE" = "menu_only" ] || [ "$UFS_MODE" = "both_off" ] || [ "$UFS_MODE" = "menu_bare" ]; then
             echo "--- remove oneplus UFSDxe from DXE/APRIORI ---"
             sed -i 's|^  INF Binaries/giulia/QcomPkg/Drivers/UFSDxe/UFSDxe.inf|  # F741B: UFSDxe removed|' "$DXEINC"
             sed -i 's|^  INF Binaries/giulia/QcomPkg/Drivers/UFSDxe/UFSDxe.inf|  # F741B: UFSDxe removed|' "$APRIORI"
             grep -n "UFSDxe" "$DXEINC" "$APRIORI" || true
           fi
-          if [ "$UFS_MODE" = "ioc_off" ] || [ "$UFS_MODE" = "both_off" ] || [ "$UFS_MODE" = "b5q_ioc_off" ]; then
-            echo "--- UFS IOC/SMMU config 1 -> 0 (b5q_ioc_off also swaps driver above) ---"
+          if [ "$UFS_MODE" = "menu_bare" ]; then
+            echo "--- remove OcdtDxe/OplusProject (crashes: Error locating MemCard Protocol -> null call @OplusProject.dll) ---"
+            sed -i 's|^  INF Binaries/giulia/QcomPkg/Drivers/OcdtDxe/OplusProject.inf|  # F741B: OplusProject removed (OCDT needs MemCard protocol)|' "$DXEINC"
+            sed -i 's|^  INF Binaries/giulia/QcomPkg/Drivers/OcdtDxe/OplusProject.inf|  # F741B: OplusProject removed (OCDT needs MemCard protocol)|' "$APRIORI"
+            echo "  --- OplusProject refs after removal (expect only commented lines) ---"
+            grep -n "OplusProject" "$DXEINC" "$APRIORI" || true
+            if grep -q '^  INF Binaries/giulia/QcomPkg/Drivers/OcdtDxe/OplusProject.inf' "$DXEINC" "$APRIORI"; then
+              echo "FATAL: OplusProject still active after removal"; exit 1
+            fi
+          fi
+          if [ "$UFS_MODE" = "ioc_off" ] || [ "$UFS_MODE" = "both_off" ] || [ "$UFS_MODE" = "b5q_ioc_off" ] || [ "$UFS_MODE" = "b6q_native_ioc_off" ]; then
+            echo "--- UFS IOC/SMMU config 1 -> 0 (b5q_ioc_off / b6q_native_ioc_off also swaps driver above) ---"
             sed -i 's/{"EnableUfsIOC", 1}/{"EnableUfsIOC", 0}/' "$CFGMAP"
             sed -i 's/{"UfsSmmuConfigForOtherBootDev", 1}/{"UfsSmmuConfigForOtherBootDev", 0}/' "$CFGMAP"
             grep -n "EnableUfsIOC\|UfsSmmuConfigForOtherBootDev" "$CFGMAP"
           fi
-          if [ "$UFS_MODE" = "b6q_native" ]; then
+          if [ "$UFS_MODE" = "b6q_native" ] || [ "$UFS_MODE" = "b6q_native_ioc_off" ]; then
             echo "--- OVERLAY b6q NATIVE UFSDxe (from owner BL package) onto b5q slot ---"
             B5Q_EFI="$work/uefi-giulia/Binaries/b5q/QcomPkg/Drivers/UFSDxe/UFSDxe.patched.efi"
             test -f "$B5Q_EFI" || { echo "FATAL: b5q UFSDxe slot missing"; exit 1; }
@@ -92,7 +104,7 @@ jobs:
             echo "  staged UFSDxe size=$SZ md5=$MD"
             test "$SZ" = "155648" || { echo "FATAL: staged size wrong"; exit 1; }
             test "$MD" = "555e4b050216fe144ef777aab78a0411" || { echo "FATAL: staged md5 wrong"; exit 1; }
-            echo "  b6q native UFSDxe staged OK (vs v6: native driver + IOC restored to stock 1)"
+            echo "  b6q native UFSDxe staged OK (b6q_native=IOC 1 / b6q_native_ioc_off=IOC 0)"
           fi
           '''
           # bake the literal mode into the injected shell so no undefined var survives set -u
